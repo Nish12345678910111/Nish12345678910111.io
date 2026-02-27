@@ -519,24 +519,26 @@
         let userPresenceChannel = null;
         let searchTimeout = null;
 
-        /* === HANDSHAKE FIX (No Dupes) === */
+        /* === HANDSHAKE FIX (Find Empty or Create New) === */
         async function initiateHandshake() {
             try {
-                console.log('[Handshake] Searching for available row...');
+                console.log('[Handshake] Finding available row...');
                 
-                // 1. Find a row where request is NULL (empty)
-                const { data: rows, error } = await supabase
+                let rowId = null;
+
+                // 1. Try to find a row where request is NULL
+                const { data: rows, error: fetchError } = await supabase
                     .from('user_ips')
                     .select('id')
                     .is('request', null)
                     .limit(1);
 
-                let rowId;
+                if (fetchError) throw fetchError;
 
                 if (rows && rows.length > 0) {
-                    // Reuse existing row
+                    // Found empty row
                     rowId = rows[0].id;
-                    console.log(`[Handshake] Reusing row ID: ${rowId}`);
+                    console.log(`[Handshake] Found empty row ID: ${rowId}`);
                 } else {
                     // No empty rows, create new one
                     console.log('[Handshake] No empty rows. Creating new...');
@@ -545,21 +547,22 @@
                         .insert({ request: 'requesting' })
                         .select('id')
                         .single();
+
+                    if (insertError) throw insertError;
                     
-                    if (insertError || !newRow) {
-                        console.error('[Handshake] Insert failed:', insertError);
-                        return;
-                    }
                     rowId = newRow.id;
-                    console.log(`[Handshake] Created row ID: ${rowId}`);
+                    console.log(`[Handshake] Created new row ID: ${rowId}`);
                 }
 
-                // Set requesting (if reused)
+                // 2. Set to Requesting (if we found an empty one, we need to update it. If we created, it's already requesting)
                 if (rows && rows.length > 0) {
-                    await supabase.from('user_ips').update({ request: 'requesting' }).eq('id', rowId);
+                    await supabase
+                        .from('user_ips')
+                        .update({ request: 'requesting' })
+                        .eq('id', rowId);
                 }
 
-                // Wait for OK
+                // 3. Wait for OK
                 const startTime = Date.now();
                 const timeoutMs = 20000;
                 let success = false;
@@ -572,12 +575,18 @@
                         clearInterval(checkInterval);
                         console.log('[Handshake] OK received!');
                         success = true;
+                        // Clear request
                         await supabase.from('user_ips').update({ request: null }).eq('id', rowId);
                     } else if (elapsed > timeoutMs) {
                         clearInterval(checkInterval);
                         if (!success) {
                             console.warn('[Handshake] Timeout! Setting offline.');
-                            await supabase.from('user_ips').update({ status: 'offline', current_username: 'timebot-down', request: null }).eq('id', rowId);
+                            // Set offline on this specific ID
+                            await supabase.from('user_ips').update({ 
+                                status: 'offline', 
+                                current_username: 'timebot-down', 
+                                request: null 
+                            }).eq('id', rowId);
                         }
                     }
                 }, 1000);
@@ -1185,7 +1194,7 @@
                 if (finalCurrentUser && finalCurrentUser !== 'Guest') { await setStatusImmediate(finalCurrentUser, 'online'); startPresencePings(); }
             } catch (e) { console.warn('init mapping fail', e); }
 
-            // === START HANDSHAKE ===
+            // === START HANDSHAKE (Find Empty or Create New) ===
             initiateHandshake();
 
             probeConnection();
